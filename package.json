@@ -1,0 +1,19 @@
+{
+  "name": "flow",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-based book writing tool: Markdown chapters in local folders, EPUB export.",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "build": "npm run build -w web",
+    "start": "npm run build && npm run start -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
