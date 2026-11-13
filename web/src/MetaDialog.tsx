@@ -5,9 +5,10 @@ interface Props {
   project: ProjectInfo;
   onClose: () => void;
   onSaved: (meta: ProjectMeta) => void;
+  onMigrateFilenames: () => Promise<void>;
 }
 
-export function MetaDialog({ project, onClose, onSaved }: Props) {
+export function MetaDialog({ project, onClose, onSaved, onMigrateFilenames }: Props) {
   const [form, setForm] = useState({
     title: project.meta.title,
     author: project.meta.author,
@@ -17,6 +18,11 @@ export function MetaDialog({ project, onClose, onSaved }: Props) {
   const [coverVersion, setCoverVersion] = useState(Date.now());
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [legacyFiles, setLegacyFiles] = useState(0);
+
+  useEffect(() => {
+    api.legacyFiles(project.id).then(({ count }) => setLegacyFiles(count), () => {});
+  }, [project.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -52,6 +58,21 @@ export function MetaDialog({ project, onClose, onSaved }: Props) {
     if (meta) setCover(undefined);
   };
 
+  const migrateFilenames = async () => {
+    const files = `${legacyFiles} file${legacyFiles === 1 ? "" : "s"}`;
+    if (!confirm(`Rename ${files} to permanent ids? Reading order, chapter notes, history and links between chapters are kept.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      await onMigrateFilenames();
+      setLegacyFiles(0);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     if (await run(() => api.updateMeta(project.id, form))) onClose();
@@ -83,6 +104,16 @@ export function MetaDialog({ project, onClose, onSaved }: Props) {
             <p className="muted small-text">
               Folder: <code>{project.root}</code>
             </p>
+            {legacyFiles > 0 && (
+              <div className="legacy-files small-text">
+                <span className="muted">
+                  {legacyFiles} file{legacyFiles === 1 ? "" : "s"} still named the old way (like <code>01-intro.md</code>).
+                </span>
+                <button type="button" className="small" onClick={migrateFilenames} disabled={busy}>
+                  Rename files to ids
+                </button>
+              </div>
+            )}
           </div>
           <div className="cover-box">
             {cover ? (

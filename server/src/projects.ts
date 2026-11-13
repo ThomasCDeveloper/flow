@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, touchRecent } from "./config.ts";
@@ -57,6 +57,21 @@ export function safePath(root: string, ...parts: string[]): string {
     throw new HttpError(400, "Path escapes project folder");
   }
   return resolved;
+}
+
+/** Generated document filenames: a random id, so files never need renaming when reordered or retitled. */
+const ID_FILE = /^[0-9a-f]{8}\.md$/;
+
+export function isIdFilename(name: string): boolean {
+  return ID_FILE.test(name);
+}
+
+/** A new, unused `<id>.md` filename in `dir`. */
+export async function newDocFilename(dir: string): Promise<string> {
+  for (;;) {
+    const name = `${randomBytes(4).toString("hex")}.md`;
+    if (!(await exists(path.join(dir, name)))) return name;
+  }
 }
 
 export function isChapterFile(name: string): boolean {
@@ -179,14 +194,15 @@ export async function createProject(
   await mkdir(path.join(root, "chapters"), { recursive: true });
   await mkdir(path.join(root, "assets"), { recursive: true });
   await mkdir(path.join(root, "notes"), { recursive: true });
-  await writeFile(path.join(root, "chapters", "01-chapter-one.md"), "# Chapter One\n\n");
+  const first = await newDocFilename(path.join(root, "chapters"));
+  await writeFile(path.join(root, "chapters", first), "# Chapter One\n\n");
   const meta: ProjectMeta = {
     title: title || folderName,
     author,
     language: "en",
     identifier: `urn:uuid:${randomUUID()}`,
     chaptersDir: "chapters",
-    chapters: ["01-chapter-one.md"],
+    chapters: [first],
     notesDir: "notes",
     chapterNotes: {},
     chapterStatus: {},

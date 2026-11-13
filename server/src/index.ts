@@ -18,6 +18,15 @@ import {
   writeChapterStatus,
 } from "./chapters.ts";
 import { buildEpub, epubFilename } from "./epub.ts";
+import { legacyFileCount, migrateFilenames } from "./migrate.ts";
+import {
+  WORKING,
+  compareVersions,
+  createCommit,
+  isDocKind,
+  listCommits,
+  uncommittedDocs,
+} from "./history.ts";
 import { createNote, deleteNote, listNotes, readNote, renameNote, writeNote } from "./notes.ts";
 import {
   HttpError,
@@ -174,6 +183,15 @@ app.get<IdParams>("/api/projects/:id/export.epub", async (req, reply) => {
     .send(data);
 });
 
+// Books created before id filenames ("01-intro.md") can be moved over on request.
+app.get<IdParams>("/api/projects/:id/legacy-files", async (req) => {
+  return { count: await legacyFileCount(await getProject(req.params.id)) };
+});
+
+app.post<IdParams>("/api/projects/:id/migrate-filenames", async (req) => {
+  return withProject(req.params.id, migrateFilenames);
+});
+
 // ---- chapters ----
 
 app.get<IdParams>("/api/projects/:id/chapters", async (req) => {
@@ -224,9 +242,8 @@ app.put<FileParams>("/api/projects/:id/chapters/:file", async (req) => {
 
 app.patch<FileParams>("/api/projects/:id/chapters/:file", async (req) => {
   const title = body<{ title: string }>(req).title ?? "";
-  return withProject(req.params.id, async (project) => ({
-    file: await renameChapter(project, req.params.file, title),
-  }));
+  await withProject(req.params.id, (project) => renameChapter(project, req.params.file, title));
+  return { file: req.params.file };
 });
 
 app.delete<FileParams>("/api/projects/:id/chapters/:file", async (req) => {
@@ -258,14 +275,48 @@ app.put<FileParams>("/api/projects/:id/notes/:file", async (req) => {
 });
 
 app.patch<FileParams>("/api/projects/:id/notes/:file", async (req) => {
-  const project = await getProject(req.params.id);
-  return { file: await renameNote(project, req.params.file, body<{ title: string }>(req).title ?? "") };
+  const title = body<{ title: string }>(req).title ?? "";
+  await renameNote(await getProject(req.params.id), req.params.file, title);
+  return { file: req.params.file };
 });
 
 app.delete<FileParams>("/api/projects/:id/notes/:file", async (req) => {
   await deleteNote(await getProject(req.params.id), req.params.file);
   return { ok: true };
 });
+
+// ---- version history (one document per commit) ----
+
+type DocParams = { Params: { id: string; kind: string; file: string } };
+
+function docKind(kind: string) {
+  if (!isDocKind(kind)) throw new HttpError(404, "Unknown document kind");
+  return kind;
+}
+
+app.get<IdParams>("/api/projects/:id/history/uncommitted", async (req) => {
+  return uncommittedDocs(await getProject(req.params.id));
+});
+
+app.get<DocParams>("/api/projects/:id/history/:kind/:file", async (req) => {
+  return listCommits(await getProject(req.params.id), docKind(req.params.kind), req.params.file);
+});
+
+app.post<DocParams>("/api/projects/:id/history/:kind/:file", async (req) => {
+  const kind = docKind(req.params.kind);
+  const message = body<{ message: string }>(req).message ?? "";
+  if (typeof message !== "string") throw new HttpError(400, "message must be a string");
+  return withProject(req.params.id, (project) => createCommit(project, kind, req.params.file, message));
+});
+
+app.get<DocParams & { Querystring: { to?: string; from?: string } }>(
+  "/api/projects/:id/history/:kind/:file/compare",
+  async (req) => {
+    const project = await getProject(req.params.id);
+    const { to, from } = req.query;
+    return compareVersions(project, docKind(req.params.kind), req.params.file, to || WORKING, from || undefined);
+  },
+);
 
 // ---- folder browser ----
 

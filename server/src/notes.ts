@@ -1,6 +1,6 @@
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { chapterTitle, countWords, slugify, type ChapterInfo } from "./chapters.ts";
-import { HttpError, isChapterFile, safePath, type Project } from "./projects.ts";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chapterTitle, countWords, setHeading, type ChapterInfo } from "./chapters.ts";
+import { HttpError, isChapterFile, newDocFilename, safePath, type Project } from "./projects.ts";
 
 export type NoteInfo = Omit<ChapterInfo, "status">;
 
@@ -20,26 +20,16 @@ async function exists(p: string): Promise<boolean> {
   );
 }
 
-async function uniqueFilename(project: Project, title: string, exclude?: string): Promise<string> {
-  const base = slugify(title);
-  for (let i = 1; ; i++) {
-    const name = i === 1 ? `${base}.md` : `${base}-${i}.md`;
-    if (name === exclude || !(await exists(notePath(project, name)))) return name;
-  }
-}
-
 export async function listNotes(project: Project): Promise<NoteInfo[]> {
   const entries = await readdir(notesDir(project), { withFileTypes: true }).catch(() => []);
-  const files = entries
-    .filter((e) => e.isFile() && isChapterFile(e.name))
-    .map((e) => e.name)
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  return Promise.all(
+  const files = entries.filter((e) => e.isFile() && isChapterFile(e.name)).map((e) => e.name);
+  const notes = await Promise.all(
     files.map(async (file) => {
       const content = await readFile(notePath(project, file), "utf8");
       return { file, title: chapterTitle(file, content), words: countWords(content) };
     }),
   );
+  return notes.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
 }
 
 export async function readNote(project: Project, file: string): Promise<string> {
@@ -55,23 +45,16 @@ export async function writeNote(project: Project, file: string, content: string)
 export async function createNote(project: Project, title: string): Promise<string> {
   const clean = title.trim() || "Untitled";
   await mkdir(notesDir(project), { recursive: true });
-  const file = await uniqueFilename(project, clean);
+  const file = await newDocFilename(notesDir(project));
   await writeFile(notePath(project, file), `# ${clean}\n\n`);
   return file;
 }
 
-export async function renameNote(project: Project, file: string, title: string): Promise<string> {
+export async function renameNote(project: Project, file: string, title: string): Promise<void> {
   const clean = title.trim();
   if (!clean) throw new HttpError(400, "Title is required");
-  const from = notePath(project, file);
-  const content = await readFile(from, "utf8");
-  const updated = /^#\s+.+$/m.test(content)
-    ? content.replace(/^#\s+.+$/m, `# ${clean}`)
-    : `# ${clean}\n\n${content}`;
-  const next = await uniqueFilename(project, clean, file);
-  await writeFile(from, updated);
-  if (next !== file) await rename(from, notePath(project, next));
-  return next;
+  const p = notePath(project, file);
+  await writeFile(p, setHeading(await readFile(p, "utf8"), clean));
 }
 
 export async function deleteNote(project: Project, file: string): Promise<void> {

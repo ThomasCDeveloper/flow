@@ -45,6 +45,44 @@ export interface BrowseResult {
   dirs: { name: string; isProject: boolean }[];
 }
 
+export type DocKind = "chapter" | "note";
+
+export interface CommitSummary {
+  id: string;
+  kind: DocKind;
+  file: string;
+  message: string;
+  createdAt: string;
+  words: number;
+}
+
+export interface Comparison {
+  oldContent: string;
+  newContent: string;
+  /** Chapter notes at each version (always empty for notes documents). */
+  oldNotes: string;
+  newNotes: string;
+}
+
+export interface FilenameMigration {
+  chapters: Record<string, string>;
+  notes: Record<string, string>;
+}
+
+export interface UncommittedDocs {
+  chapters: string[];
+  notes: string[];
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 async function request<T>(method: string, url: string, body?: unknown, contentType?: string): Promise<T> {
   const headers: Record<string, string> = { "X-Flow": "1" };
   let payload: BodyInit | undefined;
@@ -57,13 +95,14 @@ async function request<T>(method: string, url: string, body?: unknown, contentTy
   }
   const res = await fetch(url, { method, headers, body: payload });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error ?? `${res.status} ${res.statusText}`);
+  if (!res.ok) throw new ApiError(res.status, data.error ?? `${res.status} ${res.statusText}`);
   return data as T;
 }
 
 const p = (id: string) => `/api/projects/${id}`;
 const ch = (id: string, file: string) => `${p(id)}/chapters/${encodeURIComponent(file)}`;
 const nt = (id: string, file: string) => `${p(id)}/notes/${encodeURIComponent(file)}`;
+const hist = (id: string, kind: DocKind, file: string) => `${p(id)}/history/${kind}/${encodeURIComponent(file)}`;
 
 export const api = {
   recent: () => request<RecentProject[]>("GET", "/api/projects"),
@@ -93,6 +132,14 @@ export const api = {
   renameChapter: (id: string, file: string, title: string) => request<{ file: string }>("PATCH", ch(id, file), { title }),
   deleteChapter: (id: string, file: string) => request<{ ok: true }>("DELETE", ch(id, file)),
   reorder: (id: string, order: string[]) => request<{ ok: true }>("POST", `${p(id)}/order`, { order }),
+  history: (id: string, kind: DocKind, file: string) => request<CommitSummary[]>("GET", hist(id, kind, file)),
+  commit: (id: string, kind: DocKind, file: string, message = "") =>
+    request<CommitSummary>("POST", hist(id, kind, file), { message }),
+  compare: (id: string, kind: DocKind, file: string, to: string, from?: string) =>
+    request<Comparison>("GET", `${hist(id, kind, file)}/compare?${new URLSearchParams({ to, ...(from ? { from } : {}) })}`),
+  legacyFiles: (id: string) => request<{ count: number }>("GET", `${p(id)}/legacy-files`),
+  migrateFilenames: (id: string) => request<FilenameMigration>("POST", `${p(id)}/migrate-filenames`),
+  uncommitted: (id: string) => request<UncommittedDocs>("GET", `${p(id)}/history/uncommitted`),
   browse: (path?: string) => request<BrowseResult>("GET", `/api/fs/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
   coverUrl: (id: string, bust = 0) => `${p(id)}/cover?v=${bust}`,
   assetUrl: (id: string, path: string) => `${p(id)}/asset?path=${encodeURIComponent(path)}`,

@@ -3,6 +3,8 @@ import type { DocInfo } from "./api";
 
 interface Props {
   items: DocInfo[];
+  /** Files with changes not yet committed to history. */
+  uncommitted?: string[];
   activeFile: string | null;
   /** Live word count for the active item, which may have unsaved edits. */
   activeWords: number;
@@ -91,6 +93,9 @@ export function DocList(props: Props) {
               <>
                 {numbered && <span className="doc-num">{i + 1}</span>}
                 <span className="doc-title">{c.title}</span>
+                {props.uncommitted?.includes(c.file) && (
+                  <span className="uncommitted-dot" title="Changed since the last commit (Ctrl+S to commit)" />
+                )}
                 <span className="doc-words">{(c.file === activeFile ? activeWords : c.words).toLocaleString()}</span>
                 <span className="doc-actions">
                   <button

@@ -6,18 +6,30 @@ import CodeMirror from "@uiw/react-codemirror";
 import { Marked } from "marked";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { dialogue } from "../../shared/markdown.ts";
-import { api, countWords, type ChapterInfo, type ChapterStatus, type DocInfo, type ProjectInfo } from "./api";
+import {
+  ApiError,
+  api,
+  countWords,
+  type ChapterInfo,
+  type ChapterStatus,
+  type DocInfo,
+  type ProjectInfo,
+  type UncommittedDocs,
+} from "./api";
 import { Board } from "./Board";
 import { DocList } from "./DocList";
+import { History } from "./History";
 import { MetaDialog } from "./MetaDialog";
 
 type Kind = "chapter" | "note";
+type View = "editor" | "board" | "history";
 interface Doc {
   kind: Kind;
   file: string;
 }
 
 const AUTOSAVE_MS = 800;
+const NOTICE_MS = 2500;
 export const FOCUS_SHORTCUT = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘⇧F" : "Ctrl+Shift+F";
 
 export function isFocusShortcut(e: KeyboardEvent): boolean {
@@ -82,9 +94,13 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
   const [preview, setPreview] = useState(() => localStorage.getItem("flow.preview") === "1");
   const [notesOpen, setNotesOpen] = useState(() => localStorage.getItem("flow.chapterNotesOpen") === "1");
   const [showMeta, setShowMeta] = useState(false);
-  const [view, setView] = useState<"editor" | "board">(() =>
-    localStorage.getItem("flow.view") === "board" ? "board" : "editor",
-  );
+  const [uncommitted, setUncommitted] = useState<UncommittedDocs>({ chapters: [], notes: [] });
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [notice, setNotice] = useState("");
+  const [view, setView] = useState<View>(() => {
+    const stored = localStorage.getItem("flow.view");
+    return stored === "board" || stored === "history" ? stored : "editor";
+  });
 
   // Latest values for async callbacks (autosave, unmount, beforeunload).
   const live = useRef({ current, content, saved, chapterNotes, chapterNotesSaved });
@@ -93,6 +109,10 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
 
   const dirty = content !== saved || chapterNotes !== chapterNotesSaved;
   const fail = (e: unknown) => setError((e as Error).message);
+
+  const refreshUncommitted = useCallback(() => {
+    api.uncommitted(projectId).then(setUncommitted, () => {});
+  }, [projectId]);
 
   /** Save the open document (and its chapter notes) if changed. Resolves to false on failure. */
   const flush = useCallback((): Promise<boolean> => {
@@ -114,6 +134,7 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
         if (doc.kind === "chapter") setChapters(update);
         else setNotesList(update);
         setSaveFailed(false);
+        refreshUncommitted();
         return true;
       } catch (e) {
         setSaveFailed(true);
@@ -124,7 +145,7 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
       }
     });
     return saveChain.current;
-  }, [projectId]);
+  }, [projectId, refreshUncommitted]);
 
   const loadDoc = useCallback(
     async (doc: Doc | null) => {
@@ -141,16 +162,18 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
   );
 
   const reloadChapters = useCallback(async () => {
+    refreshUncommitted();
     const list = await api.chapters(projectId);
     setChapters(list);
     return list;
-  }, [projectId]);
+  }, [projectId, refreshUncommitted]);
 
   const reloadNotes = useCallback(async () => {
+    refreshUncommitted();
     const list = await api.notes(projectId);
     setNotesList(list);
     return list;
-  }, [projectId]);
+  }, [projectId, refreshUncommitted]);
 
   useEffect(() => {
     (async () => {
@@ -159,12 +182,19 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
         setInfo(p);
         onTitle(projectId, p.meta.title);
         const [list] = await Promise.all([reloadChapters(), reloadNotes()]);
+        refreshUncommitted();
         await loadDoc(list[0] ? { kind: "chapter", file: list[0].file } : null);
       } catch (e) {
         fail(e);
       }
     })();
-  }, [projectId, onTitle, reloadChapters, reloadNotes, loadDoc]);
+  }, [projectId, onTitle, reloadChapters, reloadNotes, loadDoc, refreshUncommitted]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(""), NOTICE_MS);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -190,13 +220,13 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
   const listOf = (kind: Kind) => (kind === "chapter" ? chapters : notesList);
   const reloadOf = (kind: Kind) => (kind === "chapter" ? reloadChapters : reloadNotes);
 
-  const showView = (next: "editor" | "board") => {
+  const showView = (next: View) => {
     setView(next);
     localStorage.setItem("flow.view", next);
   };
 
   const select = async (doc: Doc) => {
-    showView("editor");
+    if (view !== "history") showView("editor");
     if (sameDoc(doc, current)) return;
     const ok = await flush();
     if (!ok && !confirm("The current document could not be saved. Switch anyway and lose the changes?")) return;
@@ -276,6 +306,19 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
     }
   };
 
+  /** Rename old-style files to ids, then reopen the current document under its new name. */
+  const migrateFilenames = async () => {
+    if (!(await flush())) throw new Error("Save the current document before renaming files");
+    const renamed = await api.migrateFilenames(projectId);
+    setInfo(await api.project(projectId));
+    await Promise.all([reloadChapters(), reloadNotes()]);
+    if (current) {
+      const map = current.kind === "chapter" ? renamed.chapters : renamed.notes;
+      await loadDoc({ kind: current.kind, file: map[current.file] ?? current.file });
+    }
+    setHistoryRevision((r) => r + 1);
+  };
+
   const exportEpub = async () => {
     await flush();
     const a = document.createElement("a");
@@ -291,10 +334,26 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
     });
   };
 
+  /** Save the open document and commit it, as a version in its history. */
+  const commitCurrent = async () => {
+    const doc = current;
+    if (!doc) return;
+    if (!(await flush())) return;
+    try {
+      await api.commit(projectId, doc.kind, doc.file);
+      setNotice("Version committed");
+      setHistoryRevision((r) => r + 1);
+      refreshUncommitted();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) setNotice("No changes since the last commit");
+      else fail(e);
+    }
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
       e.preventDefault();
-      flush();
+      if (!e.repeat) commitCurrent();
     }
   };
 
@@ -341,7 +400,6 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
   }
 
   const status = saveFailed ? "error" : saving ? "saving" : dirty ? "unsaved" : "saved";
-  const dir = current?.kind === "note" ? info.meta.notesDir : info.meta.chaptersDir;
   const shown = focus ? "editor" : view;
   const split = preview && !focus;
 
@@ -359,6 +417,7 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
             <h3>Chapters</h3>
             <DocList
               items={chapters}
+              uncommitted={uncommitted.chapters}
               activeFile={current?.kind === "chapter" ? current.file : null}
               activeWords={docWords}
               numbered
@@ -377,6 +436,7 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
             </h3>
             <DocList
               items={notesList}
+              uncommitted={uncommitted.notes}
               activeFile={current?.kind === "note" ? current.file : null}
               activeWords={docWords}
               addLabel="+ New note"
@@ -397,14 +457,10 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
 
       <section className="editor-pane">
         <div className="toolbar">
-          {view === "board" ? (
-            <span className="muted file-name">Chapter board</span>
-          ) : (
-            <>
-              {current?.kind === "note" && <span className="badge">note</span>}
-              <span className="muted file-name">{current ? `${dir}/${current.file}` : "Nothing open"}</span>
-            </>
-          )}
+          <span className="muted toolbar-label">
+            {view === "board" ? "Chapter board" : view === "history" ? "Version history" : null}
+            {view !== "board" && current?.kind === "note" && <span className="badge">note</span>}
+          </span>
           <button
             className={`small ${view === "board" ? "primary" : ""}`}
             title={view === "board" ? "Back to the editor" : "Show chapters by writing status"}
@@ -412,7 +468,14 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
           >
             Board
           </button>
-          <label className="toggle" hidden={view === "board"}>
+          <button
+            className={`small ${view === "history" ? "primary" : ""}`}
+            title={view === "history" ? "Back to the editor" : "Commit a version and review changes"}
+            onClick={() => showView(view === "history" ? "editor" : "history")}
+          >
+            History
+          </button>
+          <label className="toggle" hidden={view !== "editor"}>
             <input
               type="checkbox"
               checked={preview}
@@ -441,12 +504,26 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
             onMove={moveChapter}
           />
         )}
+        {shown === "history" && (
+          <History
+            projectId={projectId}
+            doc={current && { ...current, title: listOf(current.kind).find((d) => d.file === current.file)?.title ?? current.file }}
+            flush={flush}
+            revision={historyRevision}
+            onCommitted={() => {
+              setHistoryRevision((r) => r + 1);
+              refreshUncommitted();
+            }}
+          />
+        )}
         {shown === "editor" && !focus && current?.kind === "chapter" && (
           <div className={`chapter-notes ${notesOpen ? "open" : ""}`}>
             <button className="chapter-notes-toggle" onClick={toggleNotes}>
               <span className="chevron">{notesOpen ? "▾" : "▸"}</span>
               Chapter notes
-              {!notesOpen && chapterNotes.trim() && <span className="notes-dot" title="This chapter has notes" />}
+              {!notesOpen && chapterNotes.trim() && (
+                <span className="notes-preview">{chapterNotes.trim().split("\n")[0]}</span>
+              )}
               <span className="muted">not exported</span>
             </button>
             {notesOpen && (
@@ -460,7 +537,7 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
             )}
           </div>
         )}
-        <div className={`editor-body ${split ? "split" : ""}`} hidden={shown === "board"}>
+        <div className={`editor-body ${split ? "split" : ""}`} hidden={shown !== "editor"}>
           {current ? (
             <>
               <div className="editor">
@@ -501,6 +578,7 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
           </span>
           <span>{bookWords.toLocaleString()} words in book</span>
           <span className="grow" />
+          {notice && <span className="notice">{notice}</span>}
           <span className={`save-status ${status}`}>
             {{ saved: "Saved", unsaved: "Unsaved changes", saving: "Saving…", error: "Save failed" }[status]}
           </span>
@@ -515,6 +593,7 @@ export function ProjectView({ projectId, onTitle, focus, onToggleFocus }: Props)
             setInfo({ ...info, meta });
             onTitle(projectId, meta.title);
           }}
+          onMigrateFilenames={migrateFilenames}
         />
       )}
     </div>
