@@ -11,6 +11,32 @@ function slugify(s: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+const SPINE_COLORS = ["#b5532d", "#6b7a3a", "#3f5f7a", "#c08a2e", "#7a4a6b", "#3d7468", "#8c3b3b"];
+
+function spineColor(id: string): string {
+  let hash = 0;
+  for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  return SPINE_COLORS[Math.abs(hash) % SPINE_COLORS.length];
+}
+
+function timeAgo(iso: string): string {
+  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (!Number.isFinite(seconds)) return "";
+  const units: [Intl.RelativeTimeFormatUnit, number][] = [
+    ["year", 31536000],
+    ["month", 2592000],
+    ["week", 604800],
+    ["day", 86400],
+    ["hour", 3600],
+    ["minute", 60],
+  ];
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+  for (const [unit, size] of units) {
+    if (seconds >= size) return `Opened ${rtf.format(-Math.floor(seconds / size), unit)}`;
+  }
+  return "Opened just now";
+}
+
 export function Home({ onOpen }: { onOpen: (p: ProjectInfo) => void }) {
   const [recent, setRecent] = useState<RecentProject[] | null>(null);
   const [error, setError] = useState("");
@@ -59,14 +85,20 @@ export function Home({ onOpen }: { onOpen: (p: ProjectInfo) => void }) {
 
   return (
     <div className="home">
-      <header className="home-header">
-        <h1>flow</h1>
-        <p className="muted">Write books in Markdown. Export to EPUB.</p>
-        <div className="home-actions">
-          <button className="primary" onClick={startCreate}>
-            New project
-          </button>
-          <button onClick={() => setPicker("open")}>Open folder…</button>
+      <header className="home-hero">
+        <div className="hero-text">
+          <h1 className="wordmark">
+            flow
+            <svg className="wordmark-flourish" viewBox="0 0 200 24" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M4 16 C 40 4, 70 22, 104 12 S 170 4, 196 14" />
+            </svg>
+          </h1>
+          <div className="home-actions">
+            <button className="primary" onClick={startCreate}>
+              New project
+            </button>
+            <button onClick={() => setPicker("open")}>Open folder…</button>
+          </div>
         </div>
       </header>
 
@@ -130,18 +162,32 @@ export function Home({ onOpen }: { onOpen: (p: ProjectInfo) => void }) {
 
       <section className="recent">
         <h2>Recent projects</h2>
-        {recent?.length === 0 && <p className="muted">No projects yet. Create one or open a folder.</p>}
-        <ul>
-          {recent?.map((r) => (
-            <li key={r.id} className={r.missing ? "missing" : ""}>
+        {recent?.length === 0 && (
+          <div className="shelf-empty">
+            <div className="shelf-empty-books" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <p className="muted">No projects yet. Create one or open a folder.</p>
+          </div>
+        )}
+        <ul className="shelf">
+          {recent?.map((r, i) => (
+            <li
+              key={r.id}
+              className={`book${r.missing ? " missing" : ""}`}
+              style={{ "--spine": spineColor(r.id), "--i": i } as React.CSSProperties}
+            >
               <button className="recent-open" disabled={r.missing} onClick={() => open(r.path)}>
                 <span className="recent-title">{r.title}</span>
                 <span className="recent-path">
                   {r.path}
                   {r.missing && " (folder not found)"}
                 </span>
+                <span className="recent-when">{timeAgo(r.openedAt)}</span>
               </button>
-              <button className="small ghost" title="Remove from list" onClick={() => forget(r.id)}>
+              <button className="small ghost book-forget" title="Remove from list" onClick={() => forget(r.id)}>
                 ×
               </button>
             </li>
